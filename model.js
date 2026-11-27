@@ -8,7 +8,7 @@ import { ShaderPass } from "https://esm.sh/three@0.170.0/examples/jsm/postproces
 // ---- flying sparks, shared by all models on the page (every model reads them to get lit) ----
 // they live on the page, not in a canvas, so they can cross the whole screen
 const sparks = [];
-const SPARK_GLOW_TIME = 0.8; // s, glow fades to a plain spark over this
+const SPARK_GLOW_TIME = 1.8; // s, glow fades to a plain spark over this
 const WHITE = new THREE.Color("#ffffff");
 const rand = (a, b) => a + Math.random() * (b - a);
 let sparkLoop = 0;
