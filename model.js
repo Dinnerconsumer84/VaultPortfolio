@@ -186,12 +186,17 @@ export function createModel(id, SETTINGS) {
   }));
 
   // lights, from header preset
+  // optional scrolledStrength: docked models fade to it once their starting section has scrolled out from under them
+  const scrollLights = [];
   for (const s of Object.values(window.LIGHTING[SETTINGS.lighting])) {
     if (!s.on) continue;
     const light = new THREE.DirectionalLight(s.color, s.strength);
     light.position.set(...s.position);
     scene.add(light);
+    if (s.scrolledStrength != null) scrollLights.push({ light, from: s.strength, to: s.scrolledStrength });
   }
+  const startSection = container.closest("section");
+  const LIGHT_FADE_PX = 200; // scroll distance the light fade takes
 
   const pivot = new THREE.Group();
   scene.add(pivot);
@@ -429,6 +434,14 @@ export function createModel(id, SETTINGS) {
       const q = restY > dockY ? THREE.MathUtils.clamp(window.scrollY / (restY - dockY), 0, 1) : 1;
       cx += (dockX - cx) * q; // slides to center while rising
       docked = q >= 1;
+
+      // light fade: starts when the starting section's bottom edge reaches the bottom of the visible head
+      if (scrollLights.length && startSection) {
+        const headBottom = Math.max(cy, dockY) - headOffsetPx.y + headPx / 2;
+        const t = THREE.MathUtils.clamp((headBottom - startSection.getBoundingClientRect().bottom) / LIGHT_FADE_PX, 0, 1);
+        const e = t * t * (3 - 2 * t);
+        for (const l of scrollLights) l.light.intensity = l.from + (l.to - l.from) * e;
+      }
       cy = Math.max(cy, dockY);
     }
 
