@@ -95,7 +95,10 @@ export function createModel(id, SETTINGS) {
         flinchAction.setLoop(THREE.LoopOnce, 1);
         flinchAction.clampWhenFinished = true; // hold last frame while fading back
         mixer.addEventListener("finished", (e) => {
-          if (e.action === flinchAction && idleAction) idleAction.crossFadeFrom(flinchAction, 0.25, false);
+          if (e.action === flinchAction && idleAction) {
+            idleAction.enabled = true; // three.js disables an action once it has faded out to 0
+            idleAction.crossFadeFrom(flinchAction, 0.25, false);
+          }
         });
       }
     }
