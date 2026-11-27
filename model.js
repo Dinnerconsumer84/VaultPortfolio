@@ -12,6 +12,7 @@ const SPARK_GLOW_TIME = 1.8; // s, glow fades to a plain spark over this
 const WHITE = new THREE.Color("#ffffff");
 const rand = (a, b) => a + Math.random() * (b - a);
 let sparkLoop = 0;
+let fadeLine = 0; // page y where the light fade starts for non-docked models (the docked head's starting spot)
 let activeGrab = null; // the one grab model being held right now (shared, so only one is picked up at a time)
 
 // cfg: particleTexture url, particleColors, particleCount, particleSize, particleSpeed, particleGravity, layer
@@ -673,6 +674,7 @@ export function createModel(id, SETTINGS) {
       const dockX = window.innerWidth / 2 - headOffsetPx.x;
       const dockY = headPx * (DK.visible - 0.5) + headOffsetPx.y;
       const restY = cy + window.scrollY; // where it sits with the page at the top
+      fadeLine = restY;
       const q = restY > dockY ? THREE.MathUtils.clamp(window.scrollY / (restY - dockY), 0, 1) : 1;
       cx += (dockX - cx) * q; // slides to center while rising
       docked = q >= 1;
@@ -684,6 +686,12 @@ export function createModel(id, SETTINGS) {
         for (const l of scrollLights) l.light.intensity = l.from + (l.to - l.from) * e;
       }
       cy = Math.max(cy, dockY);
+    } else if (scrollLights.length) {
+      // other models: light fade by where they sit on the page, starting at the head's starting spot, over LIGHT_FADE_PX
+      const pageY = GR ? gr.y : cy + window.scrollY;
+      const t = THREE.MathUtils.clamp((pageY - fadeLine) / LIGHT_FADE_PX, 0, 1);
+      const e = t * t * (3 - 2 * t);
+      for (const l of scrollLights) l.light.intensity = l.from + (l.to - l.from) * e;
     }
 
     // grab models: lie on the page, no look/follow
