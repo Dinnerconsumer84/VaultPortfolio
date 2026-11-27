@@ -112,12 +112,22 @@ export function createModel(id, SETTINGS) {
     mouse.y = (e.clientY - (r.top + r.height / 2)) / (window.innerHeight / 2);
   });
 
-  // flinch on click: opt-in via SETTINGS.flinch (true or { angle, push, side, stiffness, damping })
+  // flinch on click: opt-in via SETTINGS.flinch (true or { angle, push, side, snap, stiffness, damping })
+  // snap = seconds for the hit to push out; stiffness/damping = the spring back to rest
   const FL = SETTINGS.flinch
-    ? { angle: 14, push: 0.12, side: 0.08, stiffness: 160, damping: 11, ...(SETTINGS.flinch === true ? {} : SETTINGS.flinch) }
+    ? { angle: 14, push: 0.12, side: 0.08, snap: 0.05, stiffness: 160, damping: 11, ...(SETTINGS.flinch === true ? {} : SETTINGS.flinch) }
     : null;
   // damped springs [value, velocity]: tilt x/y (radians), knockback x/y/z (model heights)
   const spring = { rx: [0, 0], ry: [0, 0], px: [0, 0], py: [0, 0], pz: [0, 0] };
+  // push-out phase: each spring eases from its value at click time to start + kick
+  const snap = { t: Infinity, from: {}, kick: {} };
+  // scale kicks to the peak the spring alone would reach, so distances match the angle/push/side tuning before snap existed
+  const peakScale = FL ? (() => {
+    const w = Math.sqrt(FL.stiffness);
+    const z = Math.min(FL.damping / (2 * w), 0.999);
+    const r = Math.sqrt(1 - z * z);
+    return Math.exp(-(z / r) * Math.atan2(r, z));
+  })() : 1;
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
 
@@ -136,15 +146,14 @@ export function createModel(id, SETTINGS) {
     const hx = THREE.MathUtils.clamp(p.x / (modelHeight / 2), -1, 1);
     const hy = THREE.MathUtils.clamp(p.y / (modelHeight / 2), -1, 1);
 
-    // kick velocities so the peak is roughly angle / push; hit side recoils away
-    const w = Math.sqrt(FL.stiffness);
+    // hit side recoils away; knockback goes back from the camera and away from the cursor (click right -> back left)
     const a = FL.angle * Math.PI / 180;
-    spring.ry[1] += hx * a * w;
-    spring.rx[1] += -hy * a * w;
-    // knockback: back from the camera and away from the cursor (click right -> back left)
-    spring.px[1] += -hx * FL.side * w;
-    spring.py[1] += -hy * FL.side * w;
-    spring.pz[1] += -FL.push * w;
+    const kick = { rx: -hy * a, ry: hx * a, px: -hx * FL.side, py: -hy * FL.side, pz: -FL.push };
+    for (const key in spring) {
+      snap.from[key] = spring[key][0];
+      snap.kick[key] = kick[key] * peakScale;
+    }
+    snap.t = 0;
 
     // baked "flinch" clip takes over from the idle, then hands back
     if (flinchAction) {
@@ -162,9 +171,18 @@ export function createModel(id, SETTINGS) {
     // flinch springs (dt clamped so a background tab doesn't explode them)
     if (FL) {
       const h = Math.min(dt, 1 / 30);
-      for (const s of Object.values(spring)) {
-        s[1] += (-FL.stiffness * s[0] - FL.damping * s[1]) * h;
-        s[0] += s[1] * h;
+      const snapTime = Math.max(FL.snap, 0.001); // snap: 0 = instant
+      if (snap.t < snapTime) {
+        // push out: fast ease-out to the knocked position, ends at rest so the return spring takes over from the peak
+        snap.t = Math.min(snap.t + h, snapTime);
+        const u = 1 - Math.pow(1 - snap.t / snapTime, 3);
+        for (const key in spring) spring[key] = [snap.from[key] + snap.kick[key] * u, 0];
+      } else {
+        // return: spring back to rest
+        for (const s of Object.values(spring)) {
+          s[1] += (-FL.stiffness * s[0] - FL.damping * s[1]) * h;
+          s[0] += s[1] * h;
+        }
       }
       flinchGroup.rotation.set(spring.rx[0], spring.ry[0], 0);
       flinchGroup.position.set(spring.px[0], spring.py[0], spring.pz[0]).multiplyScalar(modelHeight);
