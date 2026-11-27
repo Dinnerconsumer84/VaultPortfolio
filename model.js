@@ -12,6 +12,7 @@ const SPARK_GLOW_TIME = 1.8; // s, glow fades to a plain spark over this
 const WHITE = new THREE.Color("#ffffff");
 const rand = (a, b) => a + Math.random() * (b - a);
 let sparkLoop = 0;
+let activeGrab = null; // the one grab model being held right now (shared, so only one is picked up at a time)
 
 // cfg: particleTexture url, particleColors, particleCount, particleSize, particleSpeed, particleGravity, layer
 function spawnSparks(x, y, away, cfg) {
@@ -141,10 +142,35 @@ export function createModel(id, SETTINGS) {
     ? { visible: 0.33, ...(SETTINGS.dock === true ? {} : SETTINGS.dock) }
     : null;
 
+  // grab & drop: opt-in via SETTINGS.grab (true or { weight, lift, tilt, bounce, fall, sway, follow, shadow, remember })
+  // weight = one knob for heavy/light: heavier lifts less, sways less, trails the cursor more and bounces less
+  // lift = scale while held, tilt = degrees when held by the outermost point (center = flat)
+  // bounce = 0..1 how much of the fall speed comes back on landing, fall = seconds to drop from held height
+  // sway = tilt from dragging fast (1 = normal), follow = how tightly it follows the cursor, shadow = 0..1 (0 = none)
+  // remember = keep dropped positions in this browser (per page)
+  const GR = SETTINGS.grab
+    ? (() => {
+        const g = SETTINGS.grab === true ? {} : SETTINGS.grab;
+        const w = Math.max(g.weight ?? 1, 0.05);
+        return {
+          lift: 1 + 0.15 / Math.sqrt(w), tilt: 35, bounce: Math.min(0.4 / w, 0.85), fall: 0.2,
+          sway: 1 / w, follow: 35 / w, shadow: 0.25, remember: true, ...g, weight: w,
+        };
+      })()
+    : null;
+
   // float centered on block, click-through
   const view = renderer.domElement;
   view.style.pointerEvents = "none";
-  if (DK) {
+  if (GR) {
+    // lives on the page itself (not in the block), so it can be dropped anywhere and scrolls with the page
+    view.style.position = "absolute";
+    view.style.left = "0";
+    view.style.top = "0";
+    view.style.zIndex = 100 + SETTINGS.layer;
+    view.style.willChange = "transform, filter";
+    document.body.appendChild(view);
+  } else if (DK) {
     // pinned to the screen, outside any section, so it can travel across sections
     view.style.position = "fixed";
     view.style.left = "0";
@@ -200,9 +226,13 @@ export function createModel(id, SETTINGS) {
   const pivot = new THREE.Group();
   scene.add(pivot);
 
+  // hold layer (grab): scales and tilts around the point the cursor holds
+  const hold = new THREE.Group();
+  pivot.add(hold);
+
   // flinch layer, sits inside pivot so it stacks on top of the look rotation
   const flinchGroup = new THREE.Group();
-  pivot.add(flinchGroup);
+  hold.add(flinchGroup);
 
   const clock = new THREE.Clock();
   let mixer, idleAction, flinchAction;
@@ -389,6 +419,176 @@ export function createModel(id, SETTINGS) {
     }
   });
 
+  // ---- grab & drop ----
+  const me = {};
+  const gr = {
+    x: 0, y: 0, // canvas center in page px
+    placed: false, // false = still sits on its block (follows the block until first moved)
+    held: false, landed: true,
+    lift: 0, vz: 0, // 0 = lying on the page, 1 = fully picked up
+    off: { x: 0, y: 0 }, // cursor minus center, at grab time
+    point: new THREE.Vector3(), // held point on the model, in hold space
+    tilt: { x: 0, y: 0 }, sway: { x: 0, y: 0 }, vel: { x: 0, y: 0 },
+    hover: false,
+  };
+  const grabKey = `grab:${location.pathname}:${id}`;
+  const pageW = () => document.documentElement.clientWidth;
+  if (GR?.remember) {
+    try {
+      const s = JSON.parse(localStorage.getItem(grabKey));
+      if (s) { gr.x = s.x * pageW(); gr.y = s.y; gr.placed = true; }
+    } catch {}
+  }
+  // keep dropped objects at the same share of the page width on resize
+  let lastW = pageW();
+  if (GR) window.addEventListener("resize", () => {
+    const w = pageW();
+    if (gr.placed) gr.x *= w / lastW;
+    lastW = w;
+  });
+  // absolute position is measured from the body only if the body is positioned
+  function bodyOffset() {
+    const cs = getComputedStyle(document.body);
+    if (cs.position === "static" && cs.transform === "none") return { x: 0, y: 0 };
+    const r = document.body.getBoundingClientRect();
+    return { x: r.left + window.scrollX, y: r.top + window.scrollY };
+  }
+  function hitModel(x, y) {
+    if (!model) return null;
+    const r = view.getBoundingClientRect();
+    if (x < r.left || x > r.right || y < r.top || y > r.bottom) return null;
+    ndc.set(((x - r.left) / r.width) * 2 - 1, -((y - r.top) / r.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    return raycaster.intersectObject(model, true)[0] ?? null;
+  }
+  function setHover(on) {
+    if (on === gr.hover) return;
+    gr.hover = on;
+    document.body.style.cursor = on ? "grab" : "";
+  }
+  const killClick = (e) => { e.preventDefault(); e.stopPropagation(); };
+
+  if (GR) {
+    window.addEventListener("pointerdown", (e) => {
+      if (activeGrab || e.button !== 0 || e.pointerType === "touch") return;
+      const hit = hitModel(e.clientX, e.clientY);
+      if (!hit) return;
+      e.preventDefault(); // no text selection / image drag
+      e.stopPropagation(); // the page (and other models) don't see this press
+      activeGrab = me;
+
+      // held point on the resting shape, flat on the page plane
+      gr.point.copy(hold.worldToLocal(hit.point.clone())).setZ(0);
+      // lever tilt: held side up, far side hangs down; more the further out it's held
+      const d = Math.hypot(gr.point.x, gr.point.y);
+      const a = (GR.tilt * Math.PI / 180) * Math.min(d / modelRadius, 1);
+      gr.tilt.x = d > 0 ? (gr.point.y / d) * a : 0;
+      gr.tilt.y = d > 0 ? -(gr.point.x / d) * a : 0;
+
+      cursor.x = e.clientX;
+      cursor.y = e.clientY;
+      gr.off.x = e.clientX + window.scrollX - gr.x;
+      gr.off.y = e.clientY + window.scrollY - gr.y;
+      gr.held = true;
+      gr.landed = false;
+      gr.placed = true;
+      gr.vz = 0;
+      view.style.zIndex = 150 + SETTINGS.layer; // above other models while carried
+      document.body.style.userSelect = "none";
+      document.body.style.cursor = "grabbing";
+    }, { capture: true });
+
+    window.addEventListener("pointermove", (e) => {
+      cursor.x = e.clientX;
+      cursor.y = e.clientY;
+      if (e.pointerType !== "touch" && !activeGrab) setHover(!!hitModel(e.clientX, e.clientY));
+    });
+
+    const release = () => {
+      if (!gr.held) return;
+      gr.held = false;
+      gr.vz = 0;
+      activeGrab = null;
+      document.body.style.userSelect = "";
+      document.body.style.cursor = gr.hover ? "grab" : "";
+      // a link under the drop point shouldn't open
+      window.addEventListener("click", killClick, { capture: true, once: true });
+      setTimeout(() => window.removeEventListener("click", killClick, { capture: true }), 0);
+      if (GR.remember) {
+        try { localStorage.setItem(grabKey, JSON.stringify({ x: gr.x / pageW(), y: gr.y })); } catch {}
+      }
+    };
+    window.addEventListener("pointerup", release);
+    window.addEventListener("pointercancel", release);
+  }
+
+  const tmpV = new THREE.Vector3();
+  function updateGrab(dt, cr) {
+    const h = Math.min(dt, 1 / 30);
+    const sx = window.scrollX, sy = window.scrollY;
+    // until moved once, it rides on its block
+    if (!gr.placed) {
+      gr.x = cr.left + cr.width / 2 + sx;
+      gr.y = cr.top + cr.height / 2 + sy;
+    }
+
+    if (gr.held) {
+      // follow the cursor (also while scrolling), heavier trails more
+      const k = 1 - Math.exp(-GR.follow * h);
+      const nx = gr.x + (cursor.x + sx - gr.off.x - gr.x) * k;
+      const ny = gr.y + (cursor.y + sy - gr.off.y - gr.y) * k;
+      if (h > 0) {
+        const kv = 1 - Math.exp(-12 * h);
+        gr.vel.x += ((nx - gr.x) / h - gr.vel.x) * kv;
+        gr.vel.y += ((ny - gr.y) / h - gr.vel.y) * kv;
+      }
+      gr.x = nx;
+      gr.y = ny;
+      // pick up quickly
+      gr.lift += (1 - gr.lift) * (1 - Math.exp(-25 * h));
+    } else {
+      gr.vel.x *= Math.exp(-12 * h);
+      gr.vel.y *= Math.exp(-12 * h);
+      // drop: falls with gravity, bounces a little, settles flat
+      if (!gr.landed) {
+        const g = 2 / Math.max(GR.fall, 0.02) ** 2;
+        gr.vz -= g * h;
+        gr.lift += gr.vz * h;
+        if (gr.lift <= 0) {
+          gr.lift = 0;
+          if (-gr.vz * GR.bounce > 0.15 * Math.sqrt(2 * g)) gr.vz = -gr.vz * GR.bounce;
+          else {
+            gr.vz = 0;
+            gr.landed = true;
+            view.style.zIndex = 100 + SETTINGS.layer;
+          }
+        }
+      }
+    }
+
+    // sway: dragging fast tips the trailing side down
+    const speed = Math.hypot(gr.vel.x, gr.vel.y);
+    const sa = gr.held && speed > 1 ? (Math.min(speed * 0.012, 20) * GR.sway * Math.PI / 180) / speed : 0;
+    const ks = 1 - Math.exp(-8 * h);
+    gr.sway.x += (-gr.vel.y * sa - gr.sway.x) * ks;
+    gr.sway.y += (-gr.vel.x * sa - gr.sway.y) * ks;
+
+    // scale + tilt around the held point (the held point stays under the cursor)
+    const s = 1 + (GR.lift - 1) * gr.lift;
+    hold.rotation.set(gr.tilt.x * gr.lift + gr.sway.x, gr.tilt.y * gr.lift + gr.sway.y, 0);
+    hold.scale.setScalar(s);
+    tmpV.copy(gr.point).multiplyScalar(s).applyEuler(hold.rotation);
+    hold.position.copy(gr.point).sub(tmpV);
+
+    const bo = bodyOffset();
+    view.style.transform = `translate(${gr.x - bo.x - SETTINGS.viewSize / 2}px, ${gr.y - bo.y - SETTINGS.viewSize / 2}px)`;
+    // shadow on the page: tight while lying, wider and further once lifted
+    if (GR.shadow > 0) {
+      const z = Math.max(gr.lift, 0);
+      view.style.filter = `drop-shadow(0 ${(1 + 14 * z).toFixed(1)}px ${(2 + 16 * z).toFixed(1)}px rgba(0,0,0,${(GR.shadow * (1 - 0.3 * z)).toFixed(3)}))`;
+    }
+  }
+
   const follow = { x: 0, y: 0 };
 
   renderer.setAnimationLoop(() => {
@@ -441,6 +641,14 @@ export function createModel(id, SETTINGS) {
         for (const l of scrollLights) l.light.intensity = l.from + (l.to - l.from) * e;
       }
       cy = Math.max(cy, dockY);
+    }
+
+    // grab models: lie on the page, no look/follow
+    if (GR) {
+      updateGrab(dt, cr);
+      updateSparkLights(view.getBoundingClientRect());
+      composer.render(dt);
+      return;
     }
 
     // cursor relative to the head
