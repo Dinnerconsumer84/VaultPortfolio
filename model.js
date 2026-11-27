@@ -161,6 +161,8 @@ export function createModel(id, SETTINGS) {
   let model;
   let modelHeight = 1;
   let headPx = 0; // head height on screen in px, for docking
+  let modelRadius = 0.5; // half the model's widest side, for click leverage
+  let docked = false; // fully docked at the top right now
 
   // model file, next to this script
   new GLTFLoader().load(new URL(SETTINGS.model, import.meta.url).href, (gltf) => {
@@ -170,6 +172,7 @@ export function createModel(id, SETTINGS) {
     const box = new THREE.Box3().setFromObject(model);
     const size = box.getSize(new THREE.Vector3());
     modelHeight = size.y;
+    modelRadius = Math.max(size.x, size.y) / 2;
     model.position.sub(box.getCenter(new THREE.Vector3()));
     camera.position.set(0, 0, size.length() * 1.2 / SETTINGS.zoom);
     camera.lookAt(0, 0, 0);
@@ -215,10 +218,11 @@ export function createModel(id, SETTINGS) {
   const mouse = { x: 0, y: 0 };
   const headOffsetPx = { x: 0, y: 0 }; // SETTINGS.position on screen, px (up = +y)
   // flinch on click: opt-in via SETTINGS.flinch (true or { angle, push, side, snap, stiffness, damping })
+  // angle = tilt for a click on the model's outermost point (less toward the center)
   // snap = seconds for the hit to push out; stiffness/damping = the spring back to rest
   const FL = SETTINGS.flinch
     ? {
-        angle: 14, push: 0.12, side: 0.08, snap: 0.05, stiffness: 160, damping: 11,
+        angle: 30, push: 0.12, side: 0.08, snap: 0.05, stiffness: 160, damping: 11,
         sparkColor: "#ffd6dc", sparkStrength: 60, sparkTime: 0.12, // light flash at the hit point
         // flying sparks: white texture tinted with a random color, thrown out from the hit, falling with gravity
         particleTexture: "spark_texture.png", particleColors: ["#2B21B8", "#C92222", "#000000"],
@@ -302,9 +306,12 @@ export function createModel(id, SETTINGS) {
     const hx = THREE.MathUtils.clamp(p.x / (modelHeight / 2), -1, 1);
     const hy = THREE.MathUtils.clamp(p.y / (modelHeight / 2), -1, 1);
 
-    // hit side recoils away; knockback goes back from the camera and away from the cursor (click right -> back left)
-    const a = FL.angle * Math.PI / 180;
-    const kick = { rx: -hy * a, ry: hx * a, px: -hx * FL.side, py: -hy * FL.side, pz: -FL.push };
+    // tilt like a lever: the further out the click, the harder the hit side tips back (center barely tilts)
+    const lx = p.x / modelRadius, ly = p.y / modelRadius;
+    const reach = Math.min(Math.hypot(lx, ly), 1);
+    const tilt = reach > 0 ? (FL.angle * Math.PI / 180) * reach ** 1.5 / reach : 0; // per unit of lx/ly
+    // knockback goes back from the camera and away from the cursor (click right -> back left)
+    const kick = { rx: -ly * tilt, ry: lx * tilt, px: -hx * FL.side, py: -hy * FL.side, pz: -FL.push };
     for (const key in spring) {
       snap.from[key] = spring[key][0];
       snap.kick[key] = kick[key] * peakScale;
@@ -321,6 +328,15 @@ export function createModel(id, SETTINGS) {
     if (flinchAction) {
       flinchAction.reset().setEffectiveWeight(1).play();
       if (idleAction) flinchAction.crossFadeFrom(idleAction, 0.1, false);
+    }
+
+    // home: opt-in via SETTINGS.home (landing page path, e.g. "/")
+    // on the landing page a click on the docked head scrolls back up; on any other page it goes to the landing page
+    if (SETTINGS.home) {
+      const homeUrl = new URL(SETTINGS.home, location.href);
+      const onHome = homeUrl.pathname.replace(/\/$/, "") === location.pathname.replace(/\/$/, "");
+      if (!onHome) setTimeout(() => { location.href = homeUrl.href; }, 250); // let the flinch show first
+      else if (docked) window.scrollTo({ top: 0, behavior: "smooth" });
     }
   });
 
@@ -367,6 +383,7 @@ export function createModel(id, SETTINGS) {
       const restY = cy + window.scrollY; // where it sits with the page at the top
       const q = restY > dockY ? THREE.MathUtils.clamp(window.scrollY / (restY - dockY), 0, 1) : 1;
       cx += (dockX - cx) * q; // slides to center while rising
+      docked = q >= 1;
       cy = Math.max(cy, dockY);
     }
 
