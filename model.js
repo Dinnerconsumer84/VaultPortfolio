@@ -150,6 +150,7 @@ export function createModel(id, SETTINGS) {
   // bounce = 0..1 how much of the fall speed comes back on landing, fall = seconds to drop from held height
   // sway = tilt from dragging fast (1 = normal), follow = how tightly it follows the cursor, shadow = 0..1 (0 = none)
   // remember = keep dropped positions in this browser (per page)
+  // rotation = initial turn on the page, degrees clockwise as seen on screen
   const GR = SETTINGS.grab
     ? (() => {
         const g = SETTINGS.grab === true ? {} : SETTINGS.grab;
@@ -439,6 +440,8 @@ export function createModel(id, SETTINGS) {
   };
   const grabKey = `grab:${location.pathname}:${id}`;
   const pageW = () => document.documentElement.clientWidth;
+  // initial turn on the page, degrees clockwise as seen on screen (a remembered drop overrides it)
+  if (GR?.rotation) gr.yaw = -GR.rotation * Math.PI / 180;
   if (GR?.remember) {
     try {
       const s = JSON.parse(localStorage.getItem(grabKey));
