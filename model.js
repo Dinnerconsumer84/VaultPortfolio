@@ -13,14 +13,30 @@ export function createModel(id, SETTINGS) {
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(SETTINGS.viewSize, SETTINGS.viewSize);
 
+  // dock on scroll: opt-in via SETTINGS.dock (true or { visible, distance, smoothing })
+  // visible = share of the head showing at the top, distance = scroll (in screen heights) to fully dock
+  const DK = SETTINGS.dock
+    ? { visible: 0.33, distance: 1, smoothing: 10, ...(SETTINGS.dock === true ? {} : SETTINGS.dock) }
+    : null;
+
   // float centered on block, click-through
   const view = renderer.domElement;
-  view.style.position = "absolute";
-  view.style.left = "50%";
-  view.style.top = "50%";
-  view.style.transform = "translate(-50%, -50%)";
   view.style.pointerEvents = "none";
-  container.appendChild(view);
+  if (DK) {
+    // pinned to the screen, outside any section, so it can travel across sections
+    view.style.position = "fixed";
+    view.style.left = "0";
+    view.style.top = "0";
+    view.style.zIndex = 100 + SETTINGS.layer;
+    view.style.willChange = "transform";
+    document.body.appendChild(view);
+  } else {
+    view.style.position = "absolute";
+    view.style.left = "50%";
+    view.style.top = "50%";
+    view.style.transform = "translate(-50%, -50%)";
+    container.appendChild(view);
+  }
 
   // layer among models
   container.closest(".fe-block").style.setProperty("z-index", 100 + SETTINGS.layer, "important");
@@ -65,6 +81,7 @@ export function createModel(id, SETTINGS) {
   let mixer, idleAction, flinchAction;
   let model;
   let modelHeight = 1;
+  let headPx = 0; // head height on screen in px, for docking
 
   // model file, next to this script
   new GLTFLoader().load(new URL(SETTINGS.model, import.meta.url).href, (gltf) => {
@@ -82,6 +99,12 @@ export function createModel(id, SETTINGS) {
 
     // offset
     pivot.position.set(SETTINGS.position.x * size.y, SETTINGS.position.y * size.y, 0);
+
+    // px per world unit at the head's depth, for docking
+    const worldPx = SETTINGS.viewSize / (2 * camera.position.z * Math.tan((camera.fov / 2) * Math.PI / 180));
+    headPx = size.y * worldPx;
+    headOffsetPx.x = pivot.position.x * worldPx;
+    headOffsetPx.y = pivot.position.y * worldPx;
 
     // idle loop, plus optional one-shot "flinch" clip
     const clips = gltf.animations;
@@ -104,13 +127,15 @@ export function createModel(id, SETTINGS) {
     }
   });
 
-  // cursor, relative to block center
-  const mouse = { x: 0, y: 0 };
+  // cursor in screen px; turned into an offset from the head every frame, so scrolling updates the look too
+  const cursor = { x: null, y: null };
   window.addEventListener("mousemove", (e) => {
-    const r = container.getBoundingClientRect();
-    mouse.x = (e.clientX - (r.left + r.width / 2)) / (window.innerWidth / 2);
-    mouse.y = (e.clientY - (r.top + r.height / 2)) / (window.innerHeight / 2);
+    cursor.x = e.clientX;
+    cursor.y = e.clientY;
   });
+  const mouse = { x: 0, y: 0 };
+  const headOffsetPx = { x: 0, y: 0 }; // SETTINGS.position on screen, px (up = +y)
+  let dockT = 0; // smoothed scroll progress 0..1
 
   // flinch on click: opt-in via SETTINGS.flinch (true or { angle, push, side, snap, stiffness, damping })
   // snap = seconds for the hit to push out; stiffness/damping = the spring back to rest
@@ -188,6 +213,30 @@ export function createModel(id, SETTINGS) {
       flinchGroup.position.set(spring.px[0], spring.py[0], spring.pz[0]).multiplyScalar(modelHeight);
     }
 
+    // canvas center on screen: in the block, or eased toward the top-center dock as you scroll
+    const cr = container.getBoundingClientRect();
+    let cx = cr.left + cr.width / 2;
+    let cy = cr.top + cr.height / 2;
+    if (DK) {
+      // start from where the block sits when the page is at the top, so the move is driven only by scroll progress (no overshoot)
+      cx += window.scrollX;
+      cy += window.scrollY;
+      const target = THREE.MathUtils.clamp(window.scrollY / (DK.distance * window.innerHeight), 0, 1);
+      dockT += (target - dockT) * (1 - Math.exp(-DK.smoothing * dt));
+      const p = dockT * dockT * (3 - 2 * dockT); // smoothstep, eases in and out
+      // docked: head centered horizontally, only `visible` of it below the top edge
+      const dockX = window.innerWidth / 2 - headOffsetPx.x;
+      const dockY = headPx * (DK.visible - 0.5) + headOffsetPx.y;
+      cx += (dockX - cx) * p;
+      cy += (dockY - cy) * p;
+    }
+
+    // cursor relative to the head
+    if (cursor.x !== null) {
+      mouse.x = (cursor.x - (cx + headOffsetPx.x)) / (window.innerWidth / 2);
+      mouse.y = (cursor.y - (cy - headOffsetPx.y)) / (window.innerHeight / 2);
+    }
+
     // look, from header preset
     const lk = window.LOOK[SETTINGS.look];
     const deg = Math.PI / 180;
@@ -202,7 +251,9 @@ export function createModel(id, SETTINGS) {
     // move toward cursor
     follow.x += (ex * lk.mouse_following_distance - follow.x) * k;
     follow.y += (ey * lk.mouse_following_distance - follow.y) * k;
-    view.style.transform = `translate(calc(-50% + ${follow.x}px), calc(-50% + ${follow.y}px))`;
+    view.style.transform = DK
+      ? `translate(${cx - SETTINGS.viewSize / 2 + follow.x}px, ${cy - SETTINGS.viewSize / 2 + follow.y}px)`
+      : `translate(calc(-50% + ${follow.x}px), calc(-50% + ${follow.y}px))`;
 
     composer.render(dt);
   });
