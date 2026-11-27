@@ -5,6 +5,85 @@ import { RenderPass } from "https://esm.sh/three@0.170.0/examples/jsm/postproces
 import { OutputPass } from "https://esm.sh/three@0.170.0/examples/jsm/postprocessing/OutputPass.js";
 import { ShaderPass } from "https://esm.sh/three@0.170.0/examples/jsm/postprocessing/ShaderPass.js";
 
+// ---- flying sparks, shared by all models on the page (every model reads them to get lit) ----
+// they live on the page, not in a canvas, so they can cross the whole screen
+const sparks = [];
+const SPARK_GLOW_TIME = 0.8; // s, glow fades to a plain spark over this
+const WHITE = new THREE.Color("#ffffff");
+const rand = (a, b) => a + Math.random() * (b - a);
+let sparkLoop = 0;
+
+// cfg: particleTexture url, particleColors, particleCount, particleSize, particleSpeed, particleGravity, layer
+function spawnSparks(x, y, away, cfg) {
+  const [lo, hi] = cfg.particleCount;
+  const count = Math.floor(rand(lo, hi + 1));
+  for (let i = 0; i < count; i++) {
+    const base = new THREE.Color(cfg.particleColors[Math.floor(Math.random() * cfg.particleColors.length)]);
+    // glow color: own color, black glows white (black light would be nothing)
+    const glow = base.getHex() === 0 ? WHITE.clone() : base.clone();
+    const s = cfg.particleSize * rand(0.7, 1.3);
+    // outer: position + glow (filter must sit outside the mask or the mask cuts the glow off); inner: tinted texture
+    const el = document.createElement("div");
+    const inner = document.createElement("div");
+    Object.assign(el.style, {
+      position: "fixed", left: "0", top: "0", width: `${s}px`, height: `${s}px`,
+      pointerEvents: "none", zIndex: 101 + cfg.layer, willChange: "transform, filter",
+    });
+    Object.assign(inner.style, {
+      width: "100%", height: "100%",
+      maskImage: cfg.particleTexture, webkitMaskImage: cfg.particleTexture,
+      maskSize: "contain", webkitMaskSize: "contain",
+      maskRepeat: "no-repeat", webkitMaskRepeat: "no-repeat",
+      maskPosition: "center", webkitMaskPosition: "center",
+    });
+    el.appendChild(inner);
+    document.body.appendChild(el);
+    const a = away + rand(-0.9, 0.9); // spread around the throw direction
+    const v = rand(...cfg.particleSpeed);
+    sparks.push({
+      el, inner, s, x, y, base, glow, age: 0, g: 1, gravity: cfg.particleGravity,
+      rot: rand(0, 360), spin: rand(-720, 720),
+      vx: Math.cos(a) * v, vy: Math.sin(a) * v - rand(150, 350), // slight upward pop before falling
+    });
+  }
+  if (!sparkLoop) {
+    let last = performance.now();
+    const tick = (now) => {
+      updateSparks(THREE.MathUtils.clamp((now - last) / 1000, 0, 1 / 30));
+      last = now;
+      sparkLoop = sparks.length ? requestAnimationFrame(tick) : 0;
+    };
+    sparkLoop = requestAnimationFrame(tick);
+  }
+}
+
+const tmpColor = new THREE.Color();
+function updateSparks(h) {
+  for (let i = sparks.length - 1; i >= 0; i--) {
+    const p = sparks[i];
+    p.age += h;
+    p.vy += p.gravity * h;
+    p.x += p.vx * h;
+    p.y += p.vy * h;
+    p.rot += p.spin * h;
+    // gone once below the screen or off either side (above the top is fine, gravity brings it back)
+    if (p.y - p.s > window.innerHeight || p.x + p.s < 0 || p.x - p.s > window.innerWidth) {
+      p.el.remove();
+      sparks.splice(i, 1);
+      continue;
+    }
+    // glow: starts hot (glow color, mixed toward white), cools to its own color, halo shrinks away
+    p.g = Math.max(0, 1 - p.age / SPARK_GLOW_TIME);
+    const g = p.g * p.g;
+    tmpColor.copy(p.base).lerp(p.glow.clone().lerp(WHITE, 0.5), g);
+    p.inner.style.backgroundColor = `#${tmpColor.getHexString()}`;
+    p.el.style.filter = g > 0.01
+      ? `drop-shadow(0 0 ${(p.s * 0.3 * g).toFixed(1)}px #ffffff) drop-shadow(0 0 ${(p.s * 0.8 * g).toFixed(1)}px #${p.glow.getHexString()}) drop-shadow(0 0 ${(p.s * 1.2 * g).toFixed(1)}px #${p.glow.getHexString()})`
+      : "none";
+    p.el.style.transform = `translate(${p.x - p.s / 2}px, ${p.y - p.s / 2}px) rotate(${p.rot}deg)`;
+  }
+}
+
 export function createModel(id, SETTINGS) {
   const container = document.getElementById(id);
   const scene = new THREE.Scene();
@@ -152,51 +231,46 @@ export function createModel(id, SETTINGS) {
   if (spark) flinchGroup.add(spark);
   let sparkT = Infinity;
 
-  // flying sparks live on the page (not in the canvas) so they can cross the whole screen
-  const particles = [];
-  const particleUrl = FL ? `url("${new URL(FL.particleTexture, import.meta.url).href}")` : "";
-  const rand = (a, b) => a + Math.random() * (b - a);
+  const sparkCfg = FL && {
+    ...FL, layer: SETTINGS.layer,
+    particleTexture: `url("${new URL(FL.particleTexture, import.meta.url).href}")`,
+  };
   function spawnParticles(x, y) {
     // throw direction: away from the head's center, through the hit point
     const r = view.getBoundingClientRect();
     const away = Math.atan2(y - (r.top + r.height / 2 - headOffsetPx.y), x - (r.left + r.width / 2 + headOffsetPx.x));
-    const [lo, hi] = FL.particleCount;
-    const count = Math.floor(rand(lo, hi + 1));
-    for (let i = 0; i < count; i++) {
-      const el = document.createElement("div");
-      const s = FL.particleSize * rand(0.7, 1.3);
-      Object.assign(el.style, {
-        position: "fixed", left: "0", top: "0", width: `${s}px`, height: `${s}px`,
-        pointerEvents: "none", zIndex: 101 + SETTINGS.layer, willChange: "transform",
-        backgroundColor: FL.particleColors[Math.floor(Math.random() * FL.particleColors.length)],
-        maskImage: particleUrl, webkitMaskImage: particleUrl,
-        maskSize: "contain", webkitMaskSize: "contain",
-        maskRepeat: "no-repeat", webkitMaskRepeat: "no-repeat",
-        maskPosition: "center", webkitMaskPosition: "center",
-      });
-      document.body.appendChild(el);
-      const a = away + rand(-0.9, 0.9); // spread around the throw direction
-      const v = rand(...FL.particleSpeed);
-      particles.push({
-        el, s, x, y, rot: rand(0, 360), spin: rand(-720, 720),
-        vx: Math.cos(a) * v, vy: Math.sin(a) * v - rand(150, 350), // slight upward pop before falling
-      });
-    }
+    spawnSparks(x, y, away, sparkCfg);
   }
-  function updateParticles(h) {
-    for (let i = particles.length - 1; i >= 0; i--) {
-      const p = particles[i];
-      p.vy += FL.particleGravity * h;
-      p.x += p.vx * h;
-      p.y += p.vy * h;
-      p.rot += p.spin * h;
-      // gone once below the screen or off either side (above the top is fine, gravity brings it back)
-      if (p.y - p.s > window.innerHeight || p.x + p.s < 0 || p.x - p.s > window.innerWidth) {
-        p.el.remove();
-        particles.splice(i, 1);
-        continue;
-      }
-      p.el.style.transform = `translate(${p.x - p.s / 2}px, ${p.y - p.s / 2}px) rotate(${p.rot}deg)`;
+
+  // spark light: a few pooled point lights that follow the glowing sparks nearest this model
+  // (pooled up front so a click never triggers a shader rebuild)
+  const SPARK_LIGHTS = 4;
+  const sparkLightStrength = SETTINGS.sparkLight ?? 10; // 0 = this model ignores spark light
+  const sparkLights = [];
+  for (let i = 0; i < (sparkLightStrength ? SPARK_LIGHTS : 0); i++) {
+    const l = new THREE.PointLight(0xffffff, 0, 0, 2);
+    scene.add(l);
+    sparkLights.push(l);
+  }
+  const rayDir = new THREE.Vector3();
+  function updateSparkLights(r) {
+    if (!sparkLights.length) return;
+    // glowing sparks, nearest to this canvas first
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const near = sparks
+      .filter((p) => p.g > 0)
+      .sort((a, b) => Math.hypot(a.x - cx, a.y - cy) - Math.hypot(b.x - cx, b.y - cy));
+    const zFront = modelHeight * 0.4; // a bit in front of the model so it lights the visible side
+    for (let i = 0; i < sparkLights.length; i++) {
+      const l = sparkLights[i];
+      const p = near[i];
+      if (!p) { l.intensity = 0; continue; }
+      // screen point -> ray through this camera -> plane just in front of the model
+      rayDir.set(((p.x - r.left) / r.width) * 2 - 1, -((p.y - r.top) / r.height) * 2 + 1, 0.5)
+        .unproject(camera).sub(camera.position).normalize();
+      l.position.copy(camera.position).addScaledVector(rayDir, (zFront - camera.position.z) / rayDir.z);
+      l.color.copy(p.glow);
+      l.intensity = sparkLightStrength * (modelHeight * 0.1) ** 2 * p.g * p.g;
     }
   }
   // damped springs [value, velocity]: tilt x/y (radians), knockback x/y/z (model heights)
@@ -276,7 +350,6 @@ export function createModel(id, SETTINGS) {
       sparkT += dt;
       const f = Math.max(0, 1 - sparkT / FL.sparkTime);
       spark.intensity = FL.sparkStrength * (modelHeight * 0.08) ** 2 * f * f;
-      updateParticles(h);
 
       flinchGroup.rotation.set(spring.rx[0], spring.ry[0], 0);
       flinchGroup.position.set(spring.px[0], spring.py[0], spring.pz[0]).multiplyScalar(modelHeight);
@@ -321,6 +394,7 @@ export function createModel(id, SETTINGS) {
       ? `translate(${cx - SETTINGS.viewSize / 2 + follow.x}px, ${cy - SETTINGS.viewSize / 2 + follow.y}px)`
       : `translate(calc(-50% + ${follow.x}px), calc(-50% + ${follow.y}px))`;
 
+    updateSparkLights(view.getBoundingClientRect());
     composer.render(dt);
   });
 }
