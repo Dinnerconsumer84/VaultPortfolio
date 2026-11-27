@@ -13,10 +13,10 @@ export function createModel(id, SETTINGS) {
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(SETTINGS.viewSize, SETTINGS.viewSize);
 
-  // dock on scroll: opt-in via SETTINGS.dock (true or { visible, distance, smoothing })
-  // visible = share of the head showing at the top, distance = scroll (in screen heights) to fully dock
+  // dock on scroll: opt-in via SETTINGS.dock (true or { visible })
+  // visible = share of the head showing at the top once docked
   const DK = SETTINGS.dock
-    ? { visible: 0.33, distance: 1, smoothing: 10, ...(SETTINGS.dock === true ? {} : SETTINGS.dock) }
+    ? { visible: 0.33, ...(SETTINGS.dock === true ? {} : SETTINGS.dock) }
     : null;
 
   // float centered on block, click-through
@@ -135,8 +135,6 @@ export function createModel(id, SETTINGS) {
   });
   const mouse = { x: 0, y: 0 };
   const headOffsetPx = { x: 0, y: 0 }; // SETTINGS.position on screen, px (up = +y)
-  let dockT = 0; // smoothed scroll progress 0..1
-
   // flinch on click: opt-in via SETTINGS.flinch (true or { angle, push, side, snap, stiffness, damping })
   // snap = seconds for the hit to push out; stiffness/damping = the spring back to rest
   const FL = SETTINGS.flinch
@@ -218,17 +216,14 @@ export function createModel(id, SETTINGS) {
     let cx = cr.left + cr.width / 2;
     let cy = cr.top + cr.height / 2;
     if (DK) {
-      // start from where the block sits when the page is at the top, so the move is driven only by scroll progress (no overshoot)
-      cx += window.scrollX;
-      cy += window.scrollY;
-      const target = THREE.MathUtils.clamp(window.scrollY / (DK.distance * window.innerHeight), 0, 1);
-      dockT += (target - dockT) * (1 - Math.exp(-DK.smoothing * dt));
-      const p = dockT * dockT * (3 - 2 * dockT); // smoothstep, eases in and out
+      // rides up with the page until it reaches the dock, then stays there; scrolling back up reverses it
       // docked: head centered horizontally, only `visible` of it below the top edge
       const dockX = window.innerWidth / 2 - headOffsetPx.x;
       const dockY = headPx * (DK.visible - 0.5) + headOffsetPx.y;
-      cx += (dockX - cx) * p;
-      cy += (dockY - cy) * p;
+      const restY = cy + window.scrollY; // where it sits with the page at the top
+      const q = restY > dockY ? THREE.MathUtils.clamp(window.scrollY / (restY - dockY), 0, 1) : 1;
+      cx += (dockX - cx) * q; // slides to center while rising
+      cy = Math.max(cy, dockY);
     }
 
     // cursor relative to the head
