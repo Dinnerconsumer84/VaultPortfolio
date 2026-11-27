@@ -129,6 +129,46 @@ function updateSparks(h) {
   }
 }
 
+// ---- sparks on links and buttons: on/off via window.BUTTON_SPARKS in the header ----
+// { on, delay, colors, count, size, speed, gravity, flashColor, layer }; on: false or missing setting = off
+// delay = ms a link waits before opening the next page, so the sparks show
+const BUTTON_SPARK_TEXTURE = `url("${new URL("spark_texture.png", import.meta.url).href}")`;
+window.addEventListener("click", (e) => {
+  const on = window.BUTTON_SPARKS;
+  if (!on || on.on === false) return;
+  const el = e.target.closest?.('a[href], button, [role="button"], input[type="submit"], input[type="button"]');
+  if (!el) return;
+  const o = {
+    delay: 250, colors: ["#2B21B8", "#C92222", "#000000"], count: [2, 4], size: 16,
+    speed: [350, 650], gravity: 1800, flashColor: "#ffd6dc", layer: 20,
+    ...(on === true ? {} : on),
+  };
+
+  // click point (keyboard "clicks" have none: use the element's center)
+  let x = e.clientX, y = e.clientY;
+  if (e.detail === 0) {
+    const r = el.getBoundingClientRect();
+    x = r.left + r.width / 2;
+    y = r.top + r.height / 2;
+  }
+  spawnFlash(x, y, o.flashColor, o.size * 16, 0.3);
+  spawnSparks(x, y, -Math.PI / 2, {
+    particleTexture: BUTTON_SPARK_TEXTURE, particleColors: o.colors, particleCount: o.count,
+    particleSize: o.size, particleSpeed: o.speed, particleGravity: o.gravity, layer: o.layer,
+  });
+
+  // plain link to another page in this tab: wait a moment so the sparks show
+  // (skipped if the site already handles the click, for new tabs, downloads and same-page # links)
+  if (el.tagName !== "A" || e.defaultPrevented || !o.delay) return;
+  if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button !== 0) return;
+  if ((el.target && el.target !== "_self") || el.hasAttribute("download")) return;
+  const url = new URL(el.href, location.href);
+  if (url.href.split("#")[0] === location.href.split("#")[0] && url.hash) return;
+  if (url.protocol === "javascript:") return;
+  e.preventDefault();
+  setTimeout(() => { location.href = url.href; }, o.delay);
+});
+
 export function createModel(id, SETTINGS) {
   const container = document.getElementById(id);
   const scene = new THREE.Scene();
