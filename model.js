@@ -142,8 +142,9 @@ export function createModel(id, SETTINGS) {
     ? { visible: 0.33, ...(SETTINGS.dock === true ? {} : SETTINGS.dock) }
     : null;
 
-  // grab & drop: opt-in via SETTINGS.grab (true or { weight, lift, tilt, bounce, fall, sway, follow, shadow, remember })
-  // weight = one knob for heavy/light: heavier lifts less, sways less, trails the cursor more and bounces less
+  // grab & drop: opt-in via SETTINGS.grab (true or { weight, lift, tilt, bounce, fall, sway, turn, follow, shadow, remember })
+  // weight = one knob for heavy/light: heavier lifts less, sways less, turns slower, trails the cursor more and bounces less
+  // turn = how readily it swings around the held point so it drags behind (1 = like a real towed object, 0 = never turns)
   // lift = scale while held, tilt = degrees when held by the outermost point (center = flat)
   // bounce = 0..1 how much of the fall speed comes back on landing, fall = seconds to drop from held height
   // sway = tilt from dragging fast (1 = normal), follow = how tightly it follows the cursor, shadow = 0..1 (0 = none)
@@ -154,7 +155,7 @@ export function createModel(id, SETTINGS) {
         const w = Math.max(g.weight ?? 1, 0.05);
         return {
           lift: 1 + 0.15 / Math.sqrt(w), tilt: 35, bounce: Math.min(0.4 / w, 0.85), fall: 0.2,
-          sway: 1 / w, follow: 35 / w, shadow: 0.25, remember: true, ...g, weight: w,
+          sway: 1 / w, turn: 1 / Math.sqrt(w), follow: 35 / w, shadow: 0.25, remember: true, ...g, weight: w,
         };
       })()
     : null;
@@ -239,6 +240,7 @@ export function createModel(id, SETTINGS) {
   let model;
   let modelHeight = 1;
   let headPx = 0; // head height on screen in px, for docking
+  let worldPx = 1; // px per world unit at the model's depth
   let modelRadius = 0.5; // half the model's widest side, for click leverage
   let docked = false; // fully docked at the top right now
 
@@ -261,7 +263,7 @@ export function createModel(id, SETTINGS) {
     pivot.position.set(SETTINGS.position.x * size.y, SETTINGS.position.y * size.y, 0);
 
     // px per world unit at the head's depth, for docking
-    const worldPx = SETTINGS.viewSize / (2 * camera.position.z * Math.tan((camera.fov / 2) * Math.PI / 180));
+    worldPx = SETTINGS.viewSize / (2 * camera.position.z * Math.tan((camera.fov / 2) * Math.PI / 180));
     headPx = size.y * worldPx;
     headOffsetPx.x = pivot.position.x * worldPx;
     headOffsetPx.y = pivot.position.y * worldPx;
@@ -426,9 +428,12 @@ export function createModel(id, SETTINGS) {
     placed: false, // false = still sits on its block (follows the block until first moved)
     held: false, landed: true,
     lift: 0, vz: 0, // 0 = lying on the page, 1 = fully picked up
-    off: { x: 0, y: 0 }, // cursor minus center, at grab time
-    point: new THREE.Vector3(), // held point on the model, in hold space
-    tilt: { x: 0, y: 0 }, sway: { x: 0, y: 0 }, vel: { x: 0, y: 0 },
+    off: { x: 0, y: 0 }, yaw0: 0, // cursor minus center and the turn, at grab time
+    point: new THREE.Vector3(), // held point on the unturned model
+    dist: 0, tiltA: 0, // held point's distance from the center, and the lever tilt it gives
+    yaw: 0, // turn on the page (radians), kept after dropping
+    pv: { x: 0, y: 0 }, last: null, // held point's speed (px/s), from the cursor
+    sway: { x: 0, y: 0 }, vel: { x: 0, y: 0 },
     hover: false,
   };
   const grabKey = `grab:${location.pathname}:${id}`;
@@ -436,7 +441,7 @@ export function createModel(id, SETTINGS) {
   if (GR?.remember) {
     try {
       const s = JSON.parse(localStorage.getItem(grabKey));
-      if (s) { gr.x = s.x * pageW(); gr.y = s.y; gr.placed = true; }
+      if (s) { gr.x = s.x * pageW(); gr.y = s.y; gr.yaw = s.yaw ?? 0; gr.placed = true; }
     } catch {}
   }
   // keep dropped objects at the same share of the page width on resize
@@ -477,18 +482,18 @@ export function createModel(id, SETTINGS) {
       e.stopPropagation(); // the page (and other models) don't see this press
       activeGrab = me;
 
-      // held point on the resting shape, flat on the page plane
+      // held point on the resting, unturned shape, flat on the page plane
       gr.point.copy(hold.worldToLocal(hit.point.clone())).setZ(0);
       // lever tilt: held side up, far side hangs down; more the further out it's held
-      const d = Math.hypot(gr.point.x, gr.point.y);
-      const a = (GR.tilt * Math.PI / 180) * Math.min(d / modelRadius, 1);
-      gr.tilt.x = d > 0 ? (gr.point.y / d) * a : 0;
-      gr.tilt.y = d > 0 ? -(gr.point.x / d) * a : 0;
+      gr.dist = Math.hypot(gr.point.x, gr.point.y);
+      gr.tiltA = (GR.tilt * Math.PI / 180) * Math.min(gr.dist / modelRadius, 1);
 
       cursor.x = e.clientX;
       cursor.y = e.clientY;
       gr.off.x = e.clientX + window.scrollX - gr.x;
       gr.off.y = e.clientY + window.scrollY - gr.y;
+      gr.yaw0 = gr.yaw;
+      gr.last = null;
       gr.held = true;
       gr.landed = false;
       gr.placed = true;
@@ -515,7 +520,7 @@ export function createModel(id, SETTINGS) {
       window.addEventListener("click", killClick, { capture: true, once: true });
       setTimeout(() => window.removeEventListener("click", killClick, { capture: true }), 0);
       if (GR.remember) {
-        try { localStorage.setItem(grabKey, JSON.stringify({ x: gr.x / pageW(), y: gr.y })); } catch {}
+        try { localStorage.setItem(grabKey, JSON.stringify({ x: gr.x / pageW(), y: gr.y, yaw: gr.yaw })); } catch {}
       }
     };
     window.addEventListener("pointerup", release);
@@ -523,6 +528,10 @@ export function createModel(id, SETTINGS) {
   }
 
   const tmpV = new THREE.Vector3();
+  const heldPt = new THREE.Vector3();
+  const qYaw = new THREE.Quaternion(), qTilt = new THREE.Quaternion();
+  const tiltEuler = new THREE.Euler();
+  const Z_AXIS = new THREE.Vector3(0, 0, 1);
   function updateGrab(dt, cr) {
     const h = Math.min(dt, 1 / 30);
     const sx = window.scrollX, sy = window.scrollY;
@@ -533,10 +542,37 @@ export function createModel(id, SETTINGS) {
     }
 
     if (gr.held) {
+      // held point's speed, from the cursor on the page (also counts scrolling)
+      const px = cursor.x + sx, py = cursor.y + sy;
+      if (gr.last && h > 0) {
+        const kp = 1 - Math.exp(-15 * h);
+        gr.pv.x += ((px - gr.last.x) / h - gr.pv.x) * kp;
+        gr.pv.y += ((py - gr.last.y) / h - gr.pv.y) * kp;
+      }
+      gr.last = { x: px, y: py };
+
+      // turn around the held point so the rest drags behind (towed-object physics: turn rate = sideways speed / lever)
+      // held near the center: barely turns
+      const L = gr.dist * (1 + (GR.lift - 1) * gr.lift);
+      const ramp = THREE.MathUtils.smoothstep(gr.dist / modelRadius, 0.1, 0.35);
+      if (ramp > 0 && L > 0) {
+        const c = Math.cos(gr.yaw), s = Math.sin(gr.yaw);
+        // direction from the held point to the center, in world (y up)
+        const dx = -(c * gr.point.x - s * gr.point.y) / gr.dist;
+        const dy = -(s * gr.point.x + c * gr.point.y) / gr.dist;
+        const vx = gr.pv.x / worldPx, vy = -gr.pv.y / worldPx;
+        const w = THREE.MathUtils.clamp(-(dx * vy - dy * vx) / L, -15, 15);
+        gr.yaw += w * GR.turn * ramp * h;
+      }
+
       // follow the cursor (also while scrolling), heavier trails more
+      // the held point's offset from the center turns with the object
+      const c = Math.cos(gr.yaw - gr.yaw0), s = Math.sin(gr.yaw - gr.yaw0);
+      const ox = c * gr.off.x + s * gr.off.y;
+      const oy = -s * gr.off.x + c * gr.off.y;
       const k = 1 - Math.exp(-GR.follow * h);
-      const nx = gr.x + (cursor.x + sx - gr.off.x - gr.x) * k;
-      const ny = gr.y + (cursor.y + sy - gr.off.y - gr.y) * k;
+      const nx = gr.x + (px - ox - gr.x) * k;
+      const ny = gr.y + (py - oy - gr.y) * k;
       if (h > 0) {
         const kv = 1 - Math.exp(-12 * h);
         gr.vel.x += ((nx - gr.x) / h - gr.vel.x) * kv;
@@ -567,18 +603,25 @@ export function createModel(id, SETTINGS) {
     }
 
     // sway: dragging fast tips the trailing side down
-    const speed = Math.hypot(gr.vel.x, gr.vel.y);
+    if (!gr.held) { gr.pv.x *= Math.exp(-12 * h); gr.pv.y *= Math.exp(-12 * h); }
+    const speed = Math.hypot(gr.pv.x, gr.pv.y);
     const sa = gr.held && speed > 1 ? (Math.min(speed * 0.012, 20) * GR.sway * Math.PI / 180) / speed : 0;
     const ks = 1 - Math.exp(-8 * h);
-    gr.sway.x += (-gr.vel.y * sa - gr.sway.x) * ks;
-    gr.sway.y += (-gr.vel.x * sa - gr.sway.y) * ks;
+    gr.sway.x += (-gr.pv.y * sa - gr.sway.x) * ks;
+    gr.sway.y += (-gr.pv.x * sa - gr.sway.y) * ks;
 
-    // scale + tilt around the held point (the held point stays under the cursor)
+    // turn on the page, then scale + tilt around the held point (the held point stays under the cursor)
     const s = 1 + (GR.lift - 1) * gr.lift;
-    hold.rotation.set(gr.tilt.x * gr.lift + gr.sway.x, gr.tilt.y * gr.lift + gr.sway.y, 0);
+    qYaw.setFromAxisAngle(Z_AXIS, gr.yaw);
+    heldPt.copy(gr.point).applyQuaternion(qYaw); // held point, turned
+    const L = Math.hypot(heldPt.x, heldPt.y);
+    const tx = L > 0 ? (heldPt.y / L) * gr.tiltA : 0;
+    const ty = L > 0 ? -(heldPt.x / L) * gr.tiltA : 0;
+    qTilt.setFromEuler(tiltEuler.set(tx * gr.lift + gr.sway.x, ty * gr.lift + gr.sway.y, 0));
+    hold.quaternion.copy(qTilt).multiply(qYaw);
     hold.scale.setScalar(s);
-    tmpV.copy(gr.point).multiplyScalar(s).applyEuler(hold.rotation);
-    hold.position.copy(gr.point).sub(tmpV);
+    tmpV.copy(heldPt).multiplyScalar(s).applyQuaternion(qTilt);
+    hold.position.copy(heldPt).sub(tmpV);
 
     const bo = bodyOffset();
     view.style.transform = `translate(${gr.x - bo.x - SETTINGS.viewSize / 2}px, ${gr.y - bo.y - SETTINGS.viewSize / 2}px)`;
