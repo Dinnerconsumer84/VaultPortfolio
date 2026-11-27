@@ -138,8 +138,16 @@ export function createModel(id, SETTINGS) {
   // flinch on click: opt-in via SETTINGS.flinch (true or { angle, push, side, snap, stiffness, damping })
   // snap = seconds for the hit to push out; stiffness/damping = the spring back to rest
   const FL = SETTINGS.flinch
-    ? { angle: 14, push: 0.12, side: 0.08, snap: 0.05, stiffness: 160, damping: 11, ...(SETTINGS.flinch === true ? {} : SETTINGS.flinch) }
+    ? {
+        angle: 14, push: 0.12, side: 0.08, snap: 0.05, stiffness: 160, damping: 11,
+        sparkColor: "#ffd6dc", sparkStrength: 60, sparkTime: 0.12, // light flash at the hit point
+        ...(SETTINGS.flinch === true ? {} : SETTINGS.flinch),
+      }
     : null;
+  // spark: one point light, dark until a hit (created up front so the first click doesn't stall on a shader rebuild)
+  const spark = FL ? new THREE.PointLight(FL.sparkColor, 0, 0, 2) : null;
+  if (spark) flinchGroup.add(spark);
+  let sparkT = Infinity;
   // damped springs [value, velocity]: tilt x/y (radians), knockback x/y/z (model heights)
   const spring = { rx: [0, 0], ry: [0, 0], px: [0, 0], py: [0, 0], pz: [0, 0] };
   // push-out phase: each spring eases from its value at click time to start + kick
@@ -178,6 +186,11 @@ export function createModel(id, SETTINGS) {
     }
     snap.t = 0;
 
+    // spark just off the surface at the hit, riding along with the head
+    const n = hit.face ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld) : new THREE.Vector3(0, 0, 1);
+    spark.position.copy(flinchGroup.worldToLocal(hit.point.clone().addScaledVector(n, modelHeight * 0.08)));
+    sparkT = 0;
+
     // baked "flinch" clip takes over from the idle, then hands back
     if (flinchAction) {
       flinchAction.reset().setEffectiveWeight(1).play();
@@ -207,6 +220,11 @@ export function createModel(id, SETTINGS) {
           s[0] += s[1] * h;
         }
       }
+      // spark: instant flash, fades out over sparkTime (strength scaled to model size so it reads the same on any model)
+      sparkT += dt;
+      const f = Math.max(0, 1 - sparkT / FL.sparkTime);
+      spark.intensity = FL.sparkStrength * (modelHeight * 0.08) ** 2 * f * f;
+
       flinchGroup.rotation.set(spring.rx[0], spring.ry[0], 0);
       flinchGroup.position.set(spring.px[0], spring.py[0], spring.pz[0]).multiplyScalar(modelHeight);
     }
