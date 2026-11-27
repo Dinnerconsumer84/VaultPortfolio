@@ -57,29 +57,47 @@ export function createModel(id, SETTINGS) {
   const pivot = new THREE.Group();
   scene.add(pivot);
 
+  // flinch layer, sits inside pivot so it stacks on top of the look rotation
+  const flinchGroup = new THREE.Group();
+  pivot.add(flinchGroup);
+
   const clock = new THREE.Clock();
-  let mixer;
+  let mixer, idleAction, flinchAction;
+  let model;
+  let modelHeight = 1;
 
   // model file, next to this script
   new GLTFLoader().load(new URL(SETTINGS.model, import.meta.url).href, (gltf) => {
-    const model = gltf.scene;
+    model = gltf.scene;
 
     // center + frame, measured before pivot rotation applies
     const box = new THREE.Box3().setFromObject(model);
     const size = box.getSize(new THREE.Vector3());
+    modelHeight = size.y;
     model.position.sub(box.getCenter(new THREE.Vector3()));
     camera.position.set(0, 0, size.length() * 1.2 / SETTINGS.zoom);
     camera.lookAt(0, 0, 0);
 
-    pivot.add(model);
+    flinchGroup.add(model);
 
     // offset
     pivot.position.set(SETTINGS.position.x * size.y, SETTINGS.position.y * size.y, 0);
 
-    // idle loop
-    if (gltf.animations.length) {
+    // idle loop, plus optional one-shot "flinch" clip
+    const clips = gltf.animations;
+    if (clips.length) {
       mixer = new THREE.AnimationMixer(model);
-      mixer.clipAction(gltf.animations[0]).play();
+      const flinchClip = THREE.AnimationClip.findByName(clips, "flinch");
+      const idleClip = THREE.AnimationClip.findByName(clips, "head-idle") ?? clips.find((c) => c !== flinchClip);
+      if (idleClip) idleAction = mixer.clipAction(idleClip).play();
+      if (flinchClip) {
+        flinchAction = mixer.clipAction(flinchClip);
+        flinchAction.setLoop(THREE.LoopOnce, 1);
+        flinchAction.clampWhenFinished = true; // hold last frame while fading back
+        mixer.addEventListener("finished", (e) => {
+          if (e.action === flinchAction && idleAction) idleAction.crossFadeFrom(flinchAction, 0.25, false);
+        });
+      }
     }
   });
 
@@ -91,11 +109,63 @@ export function createModel(id, SETTINGS) {
     mouse.y = (e.clientY - (r.top + r.height / 2)) / (window.innerHeight / 2);
   });
 
+  // flinch on click: opt-in via SETTINGS.flinch (true or { angle, push, side, stiffness, damping })
+  const FL = SETTINGS.flinch
+    ? { angle: 14, push: 0.12, side: 0.08, stiffness: 160, damping: 11, ...(SETTINGS.flinch === true ? {} : SETTINGS.flinch) }
+    : null;
+  // damped springs [value, velocity]: tilt x/y (radians), knockback x/y/z (model heights)
+  const spring = { rx: [0, 0], ry: [0, 0], px: [0, 0], py: [0, 0], pz: [0, 0] };
+  const raycaster = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+
+  // canvas is click-through, so listen on window and raycast against the model
+  if (FL) window.addEventListener("pointerdown", (e) => {
+    if (!model) return;
+    const r = view.getBoundingClientRect();
+    if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) return;
+    ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    const hit = raycaster.intersectObject(model, true)[0];
+    if (!hit) return;
+
+    // where it was hit, relative to the head center (-1..1)
+    const p = pivot.worldToLocal(hit.point.clone());
+    const hx = THREE.MathUtils.clamp(p.x / (modelHeight / 2), -1, 1);
+    const hy = THREE.MathUtils.clamp(p.y / (modelHeight / 2), -1, 1);
+
+    // kick velocities so the peak is roughly angle / push; hit side recoils away
+    const w = Math.sqrt(FL.stiffness);
+    const a = FL.angle * Math.PI / 180;
+    spring.ry[1] += hx * a * w;
+    spring.rx[1] += -hy * a * w;
+    // knockback: back from the camera and away from the cursor (click right -> back left)
+    spring.px[1] += -hx * FL.side * w;
+    spring.py[1] += -hy * FL.side * w;
+    spring.pz[1] += -FL.push * w;
+
+    // baked "flinch" clip takes over from the idle, then hands back
+    if (flinchAction) {
+      flinchAction.reset().setEffectiveWeight(1).play();
+      if (idleAction) flinchAction.crossFadeFrom(idleAction, 0.1, false);
+    }
+  });
+
   const follow = { x: 0, y: 0 };
 
   renderer.setAnimationLoop(() => {
     const dt = clock.getDelta();
     if (mixer) mixer.update(dt);
+
+    // flinch springs (dt clamped so a background tab doesn't explode them)
+    if (FL) {
+      const h = Math.min(dt, 1 / 30);
+      for (const s of Object.values(spring)) {
+        s[1] += (-FL.stiffness * s[0] - FL.damping * s[1]) * h;
+        s[0] += s[1] * h;
+      }
+      flinchGroup.rotation.set(spring.rx[0], spring.ry[0], 0);
+      flinchGroup.position.set(spring.px[0], spring.py[0], spring.pz[0]).multiplyScalar(modelHeight);
+    }
 
     // look, from header preset
     const lk = window.LOOK[SETTINGS.look];
