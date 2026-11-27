@@ -141,6 +141,9 @@ export function createModel(id, SETTINGS) {
     ? {
         angle: 14, push: 0.12, side: 0.08, snap: 0.05, stiffness: 160, damping: 11,
         sparkColor: "#ffd6dc", sparkStrength: 60, sparkTime: 0.12, // light flash at the hit point
+        // flying sparks: white texture tinted with a random color, thrown out from the hit, falling with gravity
+        particleTexture: "spark_texture.png", particleColors: ["#2B21B8", "#C92222", "#000000"],
+        particleCount: [2, 4], particleSize: 16, particleSpeed: [350, 650], particleGravity: 1800,
         ...(SETTINGS.flinch === true ? {} : SETTINGS.flinch),
       }
     : null;
@@ -148,6 +151,54 @@ export function createModel(id, SETTINGS) {
   const spark = FL ? new THREE.PointLight(FL.sparkColor, 0, 0, 2) : null;
   if (spark) flinchGroup.add(spark);
   let sparkT = Infinity;
+
+  // flying sparks live on the page (not in the canvas) so they can cross the whole screen
+  const particles = [];
+  const particleUrl = FL ? `url("${new URL(FL.particleTexture, import.meta.url).href}")` : "";
+  const rand = (a, b) => a + Math.random() * (b - a);
+  function spawnParticles(x, y) {
+    // throw direction: away from the head's center, through the hit point
+    const r = view.getBoundingClientRect();
+    const away = Math.atan2(y - (r.top + r.height / 2 - headOffsetPx.y), x - (r.left + r.width / 2 + headOffsetPx.x));
+    const [lo, hi] = FL.particleCount;
+    const count = Math.floor(rand(lo, hi + 1));
+    for (let i = 0; i < count; i++) {
+      const el = document.createElement("div");
+      const s = FL.particleSize * rand(0.7, 1.3);
+      Object.assign(el.style, {
+        position: "fixed", left: "0", top: "0", width: `${s}px`, height: `${s}px`,
+        pointerEvents: "none", zIndex: 101 + SETTINGS.layer, willChange: "transform",
+        backgroundColor: FL.particleColors[Math.floor(Math.random() * FL.particleColors.length)],
+        maskImage: particleUrl, webkitMaskImage: particleUrl,
+        maskSize: "contain", webkitMaskSize: "contain",
+        maskRepeat: "no-repeat", webkitMaskRepeat: "no-repeat",
+        maskPosition: "center", webkitMaskPosition: "center",
+      });
+      document.body.appendChild(el);
+      const a = away + rand(-0.9, 0.9); // spread around the throw direction
+      const v = rand(...FL.particleSpeed);
+      particles.push({
+        el, s, x, y, rot: rand(0, 360), spin: rand(-720, 720),
+        vx: Math.cos(a) * v, vy: Math.sin(a) * v - rand(150, 350), // slight upward pop before falling
+      });
+    }
+  }
+  function updateParticles(h) {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.vy += FL.particleGravity * h;
+      p.x += p.vx * h;
+      p.y += p.vy * h;
+      p.rot += p.spin * h;
+      // gone once below the screen or off either side (above the top is fine, gravity brings it back)
+      if (p.y - p.s > window.innerHeight || p.x + p.s < 0 || p.x - p.s > window.innerWidth) {
+        p.el.remove();
+        particles.splice(i, 1);
+        continue;
+      }
+      p.el.style.transform = `translate(${p.x - p.s / 2}px, ${p.y - p.s / 2}px) rotate(${p.rot}deg)`;
+    }
+  }
   // damped springs [value, velocity]: tilt x/y (radians), knockback x/y/z (model heights)
   const spring = { rx: [0, 0], ry: [0, 0], px: [0, 0], py: [0, 0], pz: [0, 0] };
   // push-out phase: each spring eases from its value at click time to start + kick
@@ -190,6 +241,7 @@ export function createModel(id, SETTINGS) {
     const n = hit.face ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld) : new THREE.Vector3(0, 0, 1);
     spark.position.copy(flinchGroup.worldToLocal(hit.point.clone().addScaledVector(n, modelHeight * 0.08)));
     sparkT = 0;
+    spawnParticles(e.clientX, e.clientY);
 
     // baked "flinch" clip takes over from the idle, then hands back
     if (flinchAction) {
@@ -224,6 +276,7 @@ export function createModel(id, SETTINGS) {
       sparkT += dt;
       const f = Math.max(0, 1 - sparkT / FL.sparkTime);
       spark.intensity = FL.sparkStrength * (modelHeight * 0.08) ** 2 * f * f;
+      updateParticles(h);
 
       flinchGroup.rotation.set(spring.rx[0], spring.ry[0], 0);
       flinchGroup.position.set(spring.px[0], spring.py[0], spring.pz[0]).multiplyScalar(modelHeight);
