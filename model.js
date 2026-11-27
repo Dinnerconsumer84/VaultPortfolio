@@ -44,21 +44,61 @@ function spawnSparks(x, y, away, cfg) {
       el, inner, s, x, y, base, glow, age: 0, g: 1, gravity: cfg.particleGravity,
       rot: rand(0, 360), spin: rand(-720, 720),
       vx: Math.cos(a) * v, vy: Math.sin(a) * v - rand(150, 350), // slight upward pop before falling
+      page: makePageGlow(glow), pageSize: s * PAGE_GLOW_SPARK,
     });
   }
-  if (!sparkLoop) {
-    let last = performance.now();
-    const tick = (now) => {
-      updateSparks(THREE.MathUtils.clamp((now - last) / 1000, 0, 1 / 30));
-      last = now;
-      sparkLoop = sparks.length ? requestAnimationFrame(tick) : 0;
-    };
-    sparkLoop = requestAnimationFrame(tick);
-  }
+  startSparkLoop();
+}
+
+// ---- fake light on the page itself: soft additive glows under the sparks and the impact ----
+// z-index sits above page content but below every model (models are 100 + layer), so models only get the real 3D light
+// additive blend: can only brighten what's underneath, never darken (white stays white)
+const PAGE_GLOW_Z = 99;
+const PAGE_GLOW_SPARK = 7; // spark glow diameter, in spark sizes
+const PAGE_GLOW_BLEND = CSS.supports("mix-blend-mode", "plus-lighter") ? "plus-lighter" : "screen";
+const flashes = [];
+function makePageGlow(color) {
+  const el = document.createElement("div");
+  const [r, g, b] = [color.r, color.g, color.b].map((c) => Math.round(c * 255));
+  Object.assign(el.style, {
+    position: "fixed", left: "0", top: "0", width: "100px", height: "100px",
+    pointerEvents: "none", zIndex: PAGE_GLOW_Z, mixBlendMode: PAGE_GLOW_BLEND,
+    willChange: "transform, opacity", opacity: "0",
+    background: `radial-gradient(circle, rgba(${r},${g},${b},1) 0%, rgba(${r},${g},${b},0.35) 30%, rgba(${r},${g},${b},0) 70%)`,
+  });
+  document.body.appendChild(el);
+  return el;
+}
+function placePageGlow(el, x, y, size, opacity) {
+  el.style.transform = `translate(${x - 50}px, ${y - 50}px) scale(${size / 100})`;
+  el.style.opacity = opacity.toFixed(3);
+}
+// impact glow: bigger and shorter than a spark's
+function spawnFlash(x, y, color, size, time) {
+  flashes.push({ el: makePageGlow(new THREE.Color(color)), x, y, size, time, age: 0 });
+  startSparkLoop();
+}
+
+function startSparkLoop() {
+  if (sparkLoop) return;
+  let last = performance.now();
+  const tick = (now) => {
+    updateSparks(THREE.MathUtils.clamp((now - last) / 1000, 0, 1 / 30));
+    last = now;
+    sparkLoop = sparks.length || flashes.length ? requestAnimationFrame(tick) : 0;
+  };
+  sparkLoop = requestAnimationFrame(tick);
 }
 
 const tmpColor = new THREE.Color();
 function updateSparks(h) {
+  for (let i = flashes.length - 1; i >= 0; i--) {
+    const f = flashes[i];
+    f.age += h;
+    const k = Math.max(0, 1 - f.age / f.time);
+    if (k <= 0) { f.el.remove(); flashes.splice(i, 1); continue; }
+    placePageGlow(f.el, f.x, f.y, f.size, 0.9 * k * k);
+  }
   for (let i = sparks.length - 1; i >= 0; i--) {
     const p = sparks[i];
     p.age += h;
@@ -69,6 +109,7 @@ function updateSparks(h) {
     // gone once below the screen or off either side (above the top is fine, gravity brings it back)
     if (p.y - p.s > window.innerHeight || p.x + p.s < 0 || p.x - p.s > window.innerWidth) {
       p.el.remove();
+      p.page.remove();
       sparks.splice(i, 1);
       continue;
     }
@@ -81,6 +122,8 @@ function updateSparks(h) {
       ? `drop-shadow(0 0 ${(p.s * 0.3 * g).toFixed(1)}px #ffffff) drop-shadow(0 0 ${(p.s * 0.8 * g).toFixed(1)}px #${p.glow.getHexString()}) drop-shadow(0 0 ${(p.s * 1.2 * g).toFixed(1)}px #${p.glow.getHexString()})`
       : "none";
     p.el.style.transform = `translate(${p.x - p.s / 2}px, ${p.y - p.s / 2}px) rotate(${p.rot}deg)`;
+    if (g > 0.001) placePageGlow(p.page, p.x, p.y, p.pageSize, 0.6 * g);
+    else if (p.page.style.opacity !== "0") p.page.style.opacity = "0";
   }
 }
 
@@ -114,6 +157,7 @@ export function createModel(id, SETTINGS) {
     view.style.left = "50%";
     view.style.top = "50%";
     view.style.transform = "translate(-50%, -50%)";
+    view.style.zIndex = 100 + SETTINGS.layer; // keeps it above the page glow (z 99)
     container.appendChild(view);
   }
 
@@ -322,6 +366,7 @@ export function createModel(id, SETTINGS) {
     const n = hit.face ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld) : new THREE.Vector3(0, 0, 1);
     spark.position.copy(flinchGroup.worldToLocal(hit.point.clone().addScaledVector(n, modelHeight * 0.08)));
     sparkT = 0;
+    spawnFlash(e.clientX, e.clientY, FL.sparkColor, FL.particleSize * 16, Math.max(FL.sparkTime * 2.5, 0.2));
     spawnParticles(e.clientX, e.clientY);
 
     // baked "flinch" clip takes over from the idle, then hands back
