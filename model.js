@@ -680,6 +680,8 @@ export function createModel(id, SETTINGS) {
       fadeLine = restY;
       const q = restY > dockY ? THREE.MathUtils.clamp(window.scrollY / (restY - dockY), 0, 1) : 1;
       cx += (dockX - cx) * q; // slides to center while rising
+      // html.head-docked while docked, so page CSS (e.g. the header) can react
+      if (docked !== q >= 1) document.documentElement.classList.toggle("head-docked", q >= 1);
       docked = q >= 1;
 
       // light fade: starts the moment the head reaches the dock, runs over the next LIGHT_FADE_PX of scroll
